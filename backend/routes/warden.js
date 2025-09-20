@@ -13,7 +13,9 @@ const {
   // Holiday Management
   createHoliday, getHolidays, updateHoliday, deleteHoliday,
   // Additional Collections
-  createAdditionalCollection, getAdditionalCollections
+  createAdditionalCollection, getAdditionalCollections, 
+  //bulkMarkAttendance, 
+  getRoomOccupants
 } = require('../controllers/wardenController');
 const { auth, authorize } = require('../middleware/auth');
 
@@ -65,5 +67,8 @@ router.delete('/holidays/:id', deleteHoliday);
 // Additional Collections
 router.post('/additional-collections', createAdditionalCollection);
 router.get('/additional-collections', getAdditionalCollections);
+// router.post('/attendance/bulk', bulkMarkAttendance); // NEW - Bulk mark attendance
+
+// router.get('/rooms/:room_id/occupants', getRoomOccupants); // NEW - Get occupants of a specific room
 
 module.exports = router;

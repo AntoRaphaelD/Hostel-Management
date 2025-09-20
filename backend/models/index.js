@@ -140,10 +140,13 @@ const HostelRoom = sequelize.define('HostelRoom', {
     type: DataTypes.INTEGER,
     allowNull: true
   },
-  is_occupied: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: false
+  // NEW: This field tracks the number of students.
+  occupancy_count: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
+    allowNull: false
   },
+  // REMOVED: is_occupied is no longer needed.
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
@@ -715,6 +718,8 @@ const Suspension = sequelize.define('Suspension', {
   timestamps: true
 });
 
+// ... (imports)
+
 const Attendance = sequelize.define('Attendance', {
   id: {
     type: DataTypes.INTEGER,
@@ -724,38 +729,37 @@ const Attendance = sequelize.define('Attendance', {
   student_id: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: 'tbl_Users',
-      key: 'id'
-    }
+    references: { model: 'tbl_Users', key: 'id' }
   },
-  date: {
+  date: { // This 'date' is the primary date of the record
     type: DataTypes.DATEONLY,
     allowNull: false
   },
-  status: {
-    type: DataTypes.ENUM('present', 'absent', 'late', 'excused'),
-    defaultValue: 'present'
+ status: {
+    type: DataTypes.ENUM('P', 'A', 'OD'), 
+    allowNull: false
   },
-  check_in_time: {
-    type: DataTypes.TIME,
+  from_date: {
+    type: DataTypes.DATEONLY,
     allowNull: true
   },
-  check_out_time: {
-    type: DataTypes.TIME,
+  to_date: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
+  },
+  // NEW/UPDATED: Changed from remarks to reason with ENUM
+  reason: {
+    type: DataTypes.ENUM('NCC', 'NSS', 'Internship', 'Other'),
+    allowNull: true, // Only required for OD
+  },
+  remarks: { // Kept for general remarks or 'Other' reason
+    type: DataTypes.TEXT,
     allowNull: true
   },
   marked_by: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: 'tbl_Users',
-      key: 'id'
-    }
-  },
-  remarks: {
-    type: DataTypes.TEXT,
-    allowNull: true
+    references: { model: 'tbl_Users', key: 'id' }
   }
 }, {
   tableName: 'tbl_Attendance',
@@ -2410,6 +2414,8 @@ DailyMessCharge.belongsTo(Hostel, { foreignKey: 'hostel_id' });
 User.belongsTo(Hostel, { foreignKey: 'hostel_id' });
 Hostel.hasMany(User, { foreignKey: 'hostel_id' });
 
+HostelRoom.hasMany(RoomAllotment, { foreignKey: 'room_id', as: 'tbl_RoomAllotments' });
+
 HostelRoom.belongsTo(Hostel, { foreignKey: 'hostel_id' });
 HostelRoom.belongsTo(RoomType, { foreignKey: 'room_type_id' });
 Hostel.hasMany(HostelRoom, { foreignKey: 'hostel_id' });
@@ -2423,7 +2429,7 @@ Enrollment.belongsTo(Session, { foreignKey: 'session_id' });
 User.hasMany(RoomAllotment, { foreignKey: 'student_id', as: 'tbl_RoomAllotments' });
 RoomAllotment.belongsTo(User, { foreignKey: 'student_id', as: 'AllotmentStudent' });
 RoomAllotment.belongsTo(HostelRoom, { foreignKey: 'room_id' });
-HostelRoom.hasMany(RoomAllotment, { foreignKey: 'room_id' });
+// HostelRoom.hasMany(RoomAllotment, { foreignKey: 'room_id' });
 
 User.hasMany(Leave, { foreignKey: 'student_id', as: 'StudentLeaves' });
 User.hasMany(Leave, { foreignKey: 'approved_by', as: 'ApprovedLeaves' });

@@ -1,12 +1,10 @@
-// controllers/wardenController.js
 const bcrypt = require('bcryptjs');
-const { 
-  User, Enrollment, RoomAllotment, HostelRoom, RoomType, Session,
-  Attendance, Leave, Complaint, Suspension, Holiday, Fee, 
-  AdditionalCollection, AdditionalCollectionType, Rebate,
-  HostelFacilityRegister, HostelFacility, MessCharge, Transaction
-} = require('../models');
 const { Op } = require('sequelize');
+const { 
+  sequelize, User, Enrollment, RoomAllotment, HostelRoom, RoomType, Session,
+  Attendance, Leave, Complaint, Suspension, Holiday
+  // Note: Models not used in this controller have been removed from this import for clarity
+} = require('../models');
 
 // STUDENT ENROLLMENT
 const enrollStudent = async (req, res) => {
@@ -14,16 +12,11 @@ const enrollStudent = async (req, res) => {
     const { username, password, session_id, email } = req.body;
     const hostel_id = req.user.hostel_id;
 
-    // Check if username already exists
     const existingUser = await User.findOne({ where: { username } });
     if (existingUser) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Username already exists' 
-      });
+      return res.status(400).json({ success: false, message: 'Username already exists' });
     }
 
-    // Create student user
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
@@ -35,7 +28,6 @@ const enrollStudent = async (req, res) => {
       hostel_id
     });
 
-    // Create enrollment
     const enrollment = await Enrollment.create({
       student_id: student.id,
       hostel_id,
@@ -44,10 +36,7 @@ const enrollStudent = async (req, res) => {
 
     res.status(201).json({ 
       success: true,
-      data: {
-        student: { ...student.toJSON(), password: undefined }, 
-        enrollment 
-      },
+      data: { student: { ...student.toJSON(), password: undefined }, enrollment },
       message: 'Student enrolled successfully'
     });
   } catch (error) {
@@ -58,156 +47,122 @@ const enrollStudent = async (req, res) => {
 
 const getStudents = async (req, res) => {
   try {
-    console.log('Getting students, req.user:', req.user); // Debug
-    
-    // Simplify the query first
-    const students = await User.findAll({
+    const hostel_id = req.user.hostel_id;
+    if (!hostel_id) {
+        return res.status(400).json({ success: false, message: "Warden is not assigned to a hostel." });
+    }
+
+    const studentsWithModels = await User.findAll({
       where: { 
         role: 'student',
+        hostel_id,
         is_active: true 
       },
       attributes: { exclude: ['password'] },
-      order: [['username', 'ASC']]
+      include: [
+        {
+          model: RoomAllotment,
+          as: 'tbl_RoomAllotments',
+          where: { is_active: true },
+          required: false,
+          include: [{
+            model: HostelRoom,
+            attributes: ['room_number']
+          }]
+        }
+      ],
+      order: [
+        [{ model: RoomAllotment, as: 'tbl_RoomAllotments' }, HostelRoom, 'room_number', 'ASC'],
+        ['username', 'ASC']
+      ]
     });
 
-    console.log('Students found:', students.length); // Debug
+    // Convert to plain objects to prevent circular reference errors
+    const students = studentsWithModels.map(instance => instance.get({ plain: true }));
+
     res.json({ success: true, data: students });
   } catch (error) {
     console.error('Error fetching students:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error', 
-      error: error.message 
-    });
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };
 
 // ROOM MANAGEMENT
 const getAvailableRooms = async (req, res) => {
   try {
-    console.log('Getting available rooms, req.user:', req.user); // Debug
-    
-    // Simplify room query
+    const hostel_id = req.user.hostel_id;
     const rooms = await HostelRoom.findAll({
-      where: { 
-        is_occupied: false, 
-        is_active: true 
+      where: {
+        hostel_id,
+        is_active: true,
+        [Op.where]: sequelize.where(
+          sequelize.col('occupancy_count'),
+          Op.lt,
+          sequelize.col('RoomType.capacity')
+        )
       },
-      include: [{ 
+      include: [{
         model: RoomType,
-        attributes: ['id', 'name', 'capacity']
+        attributes: ['name', 'capacity'],
+        required: true
       }],
-      order: [['room_number', 'ASC']]
+      order: [
+        [sequelize.literal('`occupancy_count` > 0'), 'DESC'],
+        ['room_number', 'ASC']
+      ]
     });
-
-    console.log('Available rooms found:', rooms.length); // Debug
     res.json({ success: true, data: rooms });
   } catch (error) {
-    console.error('Available rooms error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error',
-      error: error.message 
-    });
+    console.error('Error fetching rooms for allotment:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
 const allotRoom = async (req, res) => {
+  const transaction = await sequelize.transaction();
   try {
     const { student_id, room_id } = req.body;
     const hostel_id = req.user.hostel_id;
-
-    // Validate student belongs to this hostel
-    const student = await User.findOne({
-      where: { 
-        id: student_id, 
-        role: 'student', 
-        hostel_id: hostel_id,
-        is_active: true 
-      }
-    });
-
-    if (!student) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Student not found in this hostel' 
-      });
-    }
-
-    // Check if student already has an active room allotment
-    const existingAllotment = await RoomAllotment.findOne({
-      where: { 
-        student_id: student_id, 
-        is_active: true 
-      }
-    });
-
-    if (existingAllotment) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Student already has a room assigned' 
-      });
-    }
-
-    // Check if room is available and belongs to this hostel
+    const student = await User.findOne({ where: { id: student_id, hostel_id } });
+    if (!student) throw new Error('Student not found in this hostel.');
+    const existingAllotment = await RoomAllotment.findOne({ where: { student_id, is_active: true } });
+    if (existingAllotment) throw new Error('Student already has an active room allotment.');
     const room = await HostelRoom.findOne({
-      where: { 
-        id: room_id, 
-        hostel_id: hostel_id,
-        is_occupied: false, 
-        is_active: true 
-      }
+      where: { id: room_id, hostel_id },
+      include: [{ model: RoomType, attributes: ['capacity'] }],
+      transaction,
+      lock: true
     });
-
-    if (!room) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Room not available or not found' 
-      });
+    if (!room) throw new Error('Room not found or does not belong to this hostel.');
+    if (room.occupancy_count >= room.RoomType.capacity) {
+      throw new Error('This room is already at full capacity.');
     }
-
-    // Create room allotment
-    const allotment = await RoomAllotment.create({
-      student_id,
-      room_id,
-      allotment_date: new Date(),
-      is_active: true
-    });
-
-    // Update room status
-    await room.update({ is_occupied: true });
-
-    // Return allotment with related data
-    const allotmentWithDetails = await RoomAllotment.findByPk(allotment.id, {
-      include: [
-        {
-          model: User,
-          attributes: ['id', 'username']
-        },
-        {
-          model: HostelRoom,
-          include: [
-            {
-              model: RoomType,
-              attributes: ['id', 'name', 'capacity']
-            }
-          ]
-        }
-      ]
-    });
-
-    res.status(201).json({ 
-      success: true, 
-      data: allotmentWithDetails,
-      message: 'Room allotted successfully'
-    });
+    await RoomAllotment.create({ student_id, room_id, is_active: true }, { transaction });
+    await room.increment('occupancy_count', { by: 1, transaction });
+    await transaction.commit();
+    res.status(201).json({ success: true, message: 'Room allotted successfully.' });
   } catch (error) {
+    await transaction.rollback();
     console.error('Error in room allotment:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error', 
-      error: error.message 
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const getRoomOccupants = async (req, res) => {
+  try {
+    const { room_id } = req.params;
+    const occupants = await RoomAllotment.findAll({
+      where: { room_id, is_active: true },
+      include: [{
+        model: User,
+        as: 'AllotmentStudent',
+        attributes: ['id', 'username', 'email']
+      }]
     });
+    res.json({ success: true, data: occupants });
+  } catch (error) {
+    console.error('Error fetching room occupants:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
@@ -215,94 +170,44 @@ const allotRoom = async (req, res) => {
 const getDashboardStats = async (req, res) => {
   try {
     const hostel_id = req.user.hostel_id;
-
-    const totalStudents = await User.count({
-      where: { role: 'student', hostel_id, is_active: true }
+    const totalStudents = await User.count({ where: { role: 'student', hostel_id, is_active: true } });
+    const totalRooms = await HostelRoom.count({ where: { hostel_id, is_active: true } });
+    
+    const totalCapacityResult = await HostelRoom.findOne({
+        attributes: [[sequelize.fn('SUM', sequelize.col('RoomType.capacity')), 'totalCapacity']],
+        include: [{ model: RoomType, attributes: [], required: true }],
+        where: { hostel_id, is_active: true },
+        raw: true
     });
+    const totalCapacity = totalCapacityResult ? Number(totalCapacityResult.totalCapacity) : 0;
+    const occupiedBeds = await HostelRoom.sum('occupancy_count', { where: { hostel_id, is_active: true } }) || 0;
+    const availableBeds = totalCapacity - occupiedBeds;
 
-    const totalRooms = await HostelRoom.count({
-      where: { hostel_id, is_active: true }
-    });
-
-    const occupiedRooms = await HostelRoom.count({
-      where: { hostel_id, is_occupied: true, is_active: true }
-    });
-
-    const availableRooms = totalRooms - occupiedRooms;
-
-    // Pending requests
     const pendingLeaves = await Leave.count({
       where: { status: 'pending' },
-      include: [
-        {
-          model: User,
-          as: 'Student',
-          where: { hostel_id },
-          attributes: []
-        }
-      ]
+      include: [{ model: User, as: 'Student', where: { hostel_id }, attributes: [] }]
     });
-
     const pendingComplaints = await Complaint.count({
       where: { status: ['submitted', 'in_progress'] },
-      include: [
-        {
-          model: User,
-          as: 'Student',
-          where: { hostel_id },
-          attributes: []
-        }
-      ]
+      include: [{ model: User, as: 'Student', where: { hostel_id }, attributes: [] }]
     });
-
-    // Recent activities
     const recentLeaves = await Leave.findAll({
-      where: {
-        createdAt: {
-          [Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) // Last 7 days
-        }
-      },
-      include: [
-        {
-          model: User,
-          as: 'Student',
-          where: { hostel_id },
-          attributes: ['id', 'username']
-        }
-      ],
+      where: { createdAt: { [Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } },
+      include: [{ model: User, as: 'Student', where: { hostel_id }, attributes: ['id', 'username'] }],
       order: [['createdAt', 'DESC']],
       limit: 5
     });
-
     const recentComplaints = await Complaint.findAll({
-      where: {
-        createdAt: {
-          [Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) // Last 7 days
-        }
-      },
-      include: [
-        {
-          model: User,
-          as: 'Student',
-          where: { hostel_id },
-          attributes: ['id', 'username']
-        }
-      ],
+      where: { createdAt: { [Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } },
+      include: [{ model: User, as: 'Student', where: { hostel_id }, attributes: ['id', 'username'] }],
       order: [['createdAt', 'DESC']],
       limit: 5
     });
-
     res.json({
       success: true,
       data: {
-        totalStudents,
-        totalRooms,
-        occupiedRooms,
-        availableRooms,
-        pendingLeaves,
-        pendingComplaints,
-        recentLeaves,
-        recentComplaints
+        totalStudents, totalRooms, occupiedBeds, availableBeds,
+        pendingLeaves, pendingComplaints, recentLeaves, recentComplaints
       }
     });
   } catch (error) {
@@ -313,11 +218,7 @@ const getDashboardStats = async (req, res) => {
 
 const getSessions = async (req, res) => {
   try {
-    const sessions = await Session.findAll({
-      where: { is_active: true },
-      order: [['createdAt', 'DESC']]
-    });
-
+    const sessions = await Session.findAll({ where: { is_active: true }, order: [['createdAt', 'DESC']] });
     res.json({ success: true, data: sessions });
   } catch (error) {
     console.error('Sessions fetch error:', error);
@@ -327,95 +228,55 @@ const getSessions = async (req, res) => {
 
 // ATTENDANCE MANAGEMENT
 const markAttendance = async (req, res) => {
-  try {
-    const { student_id, date, status, check_in_time, check_out_time, remarks } = req.body;
-    const hostel_id = req.user.hostel_id;
+    try {
+        const { student_id, date, status, from_date, to_date, reason, remarks } = req.body;
+        const marked_by = req.user.id;
+        const attendanceData = { student_id, date, status, marked_by, reason, remarks, from_date: status === 'OD' ? from_date : null, to_date: status === 'OD' ? to_date : null };
+        const [attendance, created] = await Attendance.findOrCreate({ where: { student_id, date }, defaults: attendanceData });
+        if (!created) await attendance.update(attendanceData);
 
-    // Verify student belongs to this hostel
-    const student = await User.findOne({
-      where: { id: student_id, role: 'student', hostel_id, is_active: true }
-    });
-
-    if (!student) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Student not found in this hostel' 
-      });
+        if (status === 'OD' && from_date && to_date) {
+            const startDate = new Date(from_date);
+            const endDate = new Date(to_date);
+            for (let d = startDate; d <= endDate; d.setDate(d.getDate() + 1)) {
+                const currentDate = d.toISOString().split('T')[0];
+                if (currentDate === date) continue;
+                await Attendance.upsert({ student_id, date: currentDate, status: 'OD', from_date, to_date, marked_by, reason, remarks });
+            }
+        }
+        res.json({ success: true, data: attendance, message: 'Attendance marked successfully' });
+    } catch (error) {
+        console.error('Attendance marking error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
     }
+};
 
-    // Check if attendance already exists for this date
-    const existingAttendance = await Attendance.findOne({
-      where: { student_id, date }
-    });
-
-    let attendance;
-    if (existingAttendance) {
-      // Update existing attendance
-      await existingAttendance.update({
-        status,
-        check_in_time,
-        check_out_time,
-        remarks,
-        marked_by: req.user.id
-      });
-      attendance = existingAttendance;
-    } else {
-      // Create new attendance record
-      attendance = await Attendance.create({
-        student_id,
-        date,
-        status,
-        check_in_time,
-        check_out_time,
-        marked_by: req.user.id,
-        remarks
-      });
+const bulkMarkAttendance = async (req, res) => {
+    const { date, attendanceData } = req.body;
+    const marked_by = req.user.id;
+    const transaction = await sequelize.transaction();
+    try {
+        if (!date || !Array.isArray(attendanceData)) throw new Error("Date and attendance data are required.");
+        for (const record of attendanceData) {
+            await Attendance.upsert({ student_id: record.student_id, date: date, status: record.status, marked_by }, { transaction });
+        }
+        await transaction.commit();
+        res.json({ success: true, message: 'Attendance saved successfully.' });
+    } catch (error) {
+        await transaction.rollback();
+        console.error('Bulk attendance marking error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
     }
-
-    res.json({ 
-      success: true, 
-      data: attendance,
-      message: 'Attendance marked successfully'
-    });
-  } catch (error) {
-    console.error('Attendance marking error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
 };
 
 const getAttendance = async (req, res) => {
   try {
-    const { date, student_id, from_date, to_date } = req.query;
+    const { date } = req.query;
     const hostel_id = req.user.hostel_id;
-
-    let whereClause = {};
-    
-    if (date) whereClause.date = date;
-    if (student_id) whereClause.student_id = student_id;
-    if (from_date && to_date) {
-      whereClause.date = {
-        [Op.between]: [from_date, to_date]
-      };
-    }
-
     const attendance = await Attendance.findAll({
-      where: whereClause,
-      include: [
-        {
-          model: User,
-          as: 'Student',
-          where: { hostel_id },
-          attributes: ['id', 'username']
-        },
-        {
-          model: User,
-          as: 'MarkedBy',
-          attributes: ['id', 'username']
-        }
-      ],
-      order: [['date', 'DESC'], ['createdAt', 'DESC']]
+      where: { date },
+      include: [{ model: User, as: 'Student', where: { hostel_id }, attributes: ['id'] }],
     });
-
     res.json({ success: true, data: attendance });
   } catch (error) {
     console.error('Attendance fetch error:', error);
